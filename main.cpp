@@ -1,480 +1,481 @@
-#include <bits/stdc++.h>
-#include "parser.h"
-
-#define all(v) v.begin(), v.end()
-
+#include<bits/stdc++.h>
 using namespace std;
 
-/** Global Constants **/
-const string TRACE_MODE = "trace";
-const string STATISTICS_MODE = "stats";
-const string SCHEDULER_NAMES[9] = {"", "FCFS", "RR-", "SPN", "SRT", "HRRN", "FB-1", "FB-2i", "AGING"};
+// Process class
+class Process {
+public:
+    int pid;
+    int arrival;
+    int burst;
+    int burst_remain;
+    int priority;
+    int start_time = -1;
+    int completion = 0;
+    int turnaround = 0;
+    int waiting = 0;
+    int response = -1;
+    int queue_level = 0; // For MLQ/MLFQ
 
-// Sorting helpers
-bool sortByBurstTime(const tuple<string, int, int>& a, const tuple<string, int, int>& b) {
-    return (get<2>(a) < get<2>(b));
-}
-bool sortByArrivalTime(const tuple<string, int, int>& a, const tuple<string, int, int>& b) {
-    return (get<1>(a) < get<1>(b));
-}
-bool sortByResponseRatioDesc(const tuple<string, double, int>& a, const tuple<string, double, int>& b) {
-    return get<1>(a) > get<1>(b);
-}
-bool sortByPriority(const tuple<int, int, int>& a, const tuple<int, int, int>& b) {
-    if (get<0>(a) == get<0>(b))
-        return get<2>(a) > get<2>(b);
-    return get<0>(a) > get<0>(b);
-}
+    Process(int id, int a, int b, int p){
+        pid=id;
+        arrival=a;
+        burst=b;
+        burst_remain=b;
+        priority=p;
+    }
+};
 
-// Timeline management
-void clearScheduleTimeline() {
-    for (int t = 0; t < totalTimeUnits; t++)
-        for (int p = 0; p < totalProcesses; p++)
-            scheduleTimeline[t][p] = ' ';
-}
+struct GanttEntry {
+    int pid;
+    int start;
+    int end;
+    bool context_switch;
+};
 
-// Process tuple accessors
-string getProcessID(tuple<string, int, int>& proc) { return get<0>(proc); }
-int getArrival(tuple<string, int, int>& proc) { return get<1>(proc); }
-int getBurst(tuple<string, int, int>& proc) { return get<2>(proc); }
-int getPriority(tuple<string, int, int>& proc) { return get<2>(proc); }
+class Scheduler {
+    int context_switch_overhead;
+    vector<Process> processes;
+    vector<GanttEntry> gantt;
 
-// Response ratio calculation
-double computeResponseRatio(int wait, int burst) {
-    return (wait + burst) * 1.0 / burst;
-}
+public:
+    Scheduler(vector<Process> plist, int cs_overhead) {
+        processes=plist; 
+        context_switch_overhead=cs_overhead;
+    }
 
-// Fill in waiting periods in the timeline
-void markWaitingPeriods() {
-    for (int i = 0; i < totalProcesses; i++) {
-        int arrival = getArrival(processList[i]);
-        for (int t = arrival; t < completionTime[i]; t++) {
-            if (scheduleTimeline[t][i] != '*')
-                scheduleTimeline[t][i] = '.';
+    void resetProcesses() {
+        for (auto& p : processes) {
+            p.burst_remain = p.burst;
+            p.start_time = -1;
+            p.completion = 0;
+            p.turnaround = 0;
+            p.waiting = 0;
+            p.response = -1;
+            p.queue_level = 0;
         }
+        gantt.clear();
     }
-}
 
-// First-Come-First-Serve
-void runFCFS() {
-    int currentTime = getArrival(processList[0]);
-    for (int i = 0; i < totalProcesses; i++) {
-        int procIdx = i;
-        int arrival = getArrival(processList[i]);
-        int burst = getBurst(processList[i]);
+    // FCFS
+    void runFCFS() {
+        resetProcesses();
+        vector<Process> plist = processes;
+        sort(plist.begin(), plist.end(), [](const Process& a, const Process& b) {
+            return a.arrival < b.arrival;
+        });
 
-        completionTime[procIdx] = (currentTime + burst);
-        turnaroundTime[procIdx] = (completionTime[procIdx] - arrival);
-        normalizedTurnaround[procIdx] = (turnaroundTime[procIdx] * 1.0 / burst);
-
-        for (int t = currentTime; t < completionTime[procIdx]; t++)
-            scheduleTimeline[t][procIdx] = '*';
-        for (int t = arrival; t < currentTime; t++)
-            scheduleTimeline[t][procIdx] = '.';
-        currentTime += burst;
+        int time = 0, prev_pid = -1;
+        for (auto& p : plist) {
+            if (time < p.arrival) 
+                time = p.arrival;
+            if (prev_pid != -1 && prev_pid != p.pid)
+                time += context_switch_overhead;
+            p.start_time = time;
+            p.response = time - p.arrival;
+            time += p.burst;
+            p.completion = time;
+            p.turnaround = p.completion - p.arrival;
+            p.waiting = p.turnaround - p.burst;
+            gantt.push_back({p.pid, p.start_time, p.completion, prev_pid != -1 && prev_pid != p.pid});
+            prev_pid = p.pid;
+        }
+        printResults("FCFS", plist);
     }
-}
 
-// Round Robin
-void runRoundRobin(int quantum) {
-    queue<pair<int, int>> rrQueue; // (procIdx, remainingBurst)
-    int nextProc = 0;
-    if (getArrival(processList[nextProc]) == 0) {
-        rrQueue.push({nextProc, getBurst(processList[nextProc])});
-        nextProc++;
-    }
-    int timeSlice = quantum;
-    for (int t = 0; t < totalTimeUnits; t++) {
-        if (!rrQueue.empty()) {
-            int procIdx = rrQueue.front().first;
-            rrQueue.front().second--;
-            int remainingBurst = rrQueue.front().second;
-            int arrival = getArrival(processList[procIdx]);
-            int burst = getBurst(processList[procIdx]);
-            timeSlice--;
-            scheduleTimeline[t][procIdx] = '*';
-            while (nextProc < totalProcesses && getArrival(processList[nextProc]) == t + 1) {
-                rrQueue.push({nextProc, getBurst(processList[nextProc])});
-                nextProc++;
+    // SJF Non-Preemptive
+    void runSJF_NP() {
+        resetProcesses();
+        vector<Process> plist = processes;
+        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
+        vector<bool> done(n, false);
+
+        while (completed < n) {
+            int idx = -1, min_burst = INT_MAX;
+            for (int i = 0; i < n; ++i) {
+                if (!done[i] && plist[i].arrival <= time && plist[i].burst < min_burst) {
+                    min_burst = plist[i].burst;
+                    idx = i;
+                }
             }
-
-            if (timeSlice == 0 && remainingBurst == 0) {
-                completionTime[procIdx] = t + 1;
-                turnaroundTime[procIdx] = (completionTime[procIdx] - arrival);
-                normalizedTurnaround[procIdx] = (turnaroundTime[procIdx] * 1.0 / burst);
-                timeSlice = quantum;
-                rrQueue.pop();
-            } else if (timeSlice == 0 && remainingBurst != 0) {
-                rrQueue.pop();
-                rrQueue.push({procIdx, remainingBurst});
-                timeSlice = quantum;
-            } else if (timeSlice != 0 && remainingBurst == 0) {
-                completionTime[procIdx] = t + 1;
-                turnaroundTime[procIdx] = (completionTime[procIdx] - arrival);
-                normalizedTurnaround[procIdx] = (turnaroundTime[procIdx] * 1.0 / burst);
-                rrQueue.pop();
-                timeSlice = quantum;
+            if (idx == -1) {
+                time++; continue;
             }
+            if (prev_pid != -1 && prev_pid != plist[idx].pid)
+                time += context_switch_overhead;
+            plist[idx].start_time = time;
+            plist[idx].response = time - plist[idx].arrival;
+            time += plist[idx].burst;
+            plist[idx].completion = time;
+            plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
+            plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
+            done[idx] = true;
+            completed++;
+            gantt.push_back({plist[idx].pid, plist[idx].start_time, plist[idx].completion, prev_pid != -1 && prev_pid != plist[idx].pid});
+            prev_pid = plist[idx].pid;
         }
-        while (nextProc < totalProcesses && getArrival(processList[nextProc]) == t + 1) {
-            rrQueue.push({nextProc, getBurst(processList[nextProc])});
-            nextProc++;
-        }
+        printResults("SJF (NP)", plist);
     }
-    markWaitingPeriods();
-}
 
-// Shortest Process Next (Non-preemptive)
-void runSPN() {
-    priority_queue<pair<int, int>, vector<pair<int, int>>, greater<pair<int, int>>> pq; // (burst, procIdx)
-    int nextProc = 0;
-    for (int t = 0; t < totalTimeUnits; t++) {
-        while (nextProc < totalProcesses && getArrival(processList[nextProc]) <= t) {
-            pq.push({getBurst(processList[nextProc]), nextProc});
-            nextProc++;
+    // SJF Preemptive (SRTF)
+    void runSJF_P() {
+        resetProcesses();
+        vector<Process> plist = processes;
+        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
+        vector<bool> done(n, false);
+
+        while (completed < n) {
+            int idx = -1, min_burst = INT_MAX;
+            for (int i = 0; i < n; ++i) {
+                if (!done[i] && plist[i].arrival <= time && plist[i].burst_remain < min_burst && plist[i].burst_remain > 0) {
+                    min_burst = plist[i].burst_remain;
+                    idx = i;
+                }
+            }
+            if (idx == -1) { time++; continue; }
+            if (prev_pid != -1 && prev_pid != plist[idx].pid)
+                time += context_switch_overhead;
+            if (plist[idx].start_time == -1)
+                plist[idx].start_time = time, plist[idx].response = time - plist[idx].arrival;
+            int next_time = time + 1;
+            plist[idx].burst_remain--;
+            if (plist[idx].burst_remain == 0) {
+                plist[idx].completion = next_time;
+                plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
+                plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
+                done[idx] = true;
+                completed++;
+            }
+            gantt.push_back({plist[idx].pid, time, next_time, prev_pid != -1 && prev_pid != plist[idx].pid});
+            prev_pid = plist[idx].pid;
+            time = next_time;
         }
-        if (!pq.empty()) {
-            int procIdx = pq.top().second;
-            int arrival = getArrival(processList[procIdx]);
-            int burst = getBurst(processList[procIdx]);
-            pq.pop();
-
-            int temp = arrival;
-            for (; temp < t; temp++)
-                scheduleTimeline[temp][procIdx] = '.';
-            temp = t;
-            for (; temp < t + burst; temp++)
-                scheduleTimeline[temp][procIdx] = '*';
-
-            completionTime[procIdx] = (t + burst);
-            turnaroundTime[procIdx] = (completionTime[procIdx] - arrival);
-            normalizedTurnaround[procIdx] = (turnaroundTime[procIdx] * 1.0 / burst);
-            t = temp - 1;
-        }
+        printResults("SJF (P)", plist);
     }
-}
 
-// Shortest Remaining Time (Preemptive)
-void runSRT() {
-    priority_queue<pair<int, int>, vector<pair<int, int>>, greater<pair<int, int>>> pq; // (remaining, procIdx)
-    int nextProc = 0;
-    for (int t = 0; t < totalTimeUnits; t++) {
-        while (nextProc < totalProcesses && getArrival(processList[nextProc]) == t) {
-            pq.push({getBurst(processList[nextProc]), nextProc});
-            nextProc++;
+    // Priority Non-Preemptive
+    void runPriority_NP() {
+        resetProcesses();
+        vector<Process> plist = processes;
+        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
+        vector<bool> done(n, false);
+
+        while (completed < n) {
+            int idx = -1, min_pri = INT_MAX;
+            for (int i = 0; i < n; ++i) {
+                if (!done[i] && plist[i].arrival <= time && plist[i].priority < min_pri) {
+                    min_pri = plist[i].priority;
+                    idx = i;
+                }
+            }
+            if (idx == -1) { time++; continue; }
+            if (prev_pid != -1 && prev_pid != plist[idx].pid)
+                time += context_switch_overhead;
+            plist[idx].start_time = time;
+            plist[idx].response = time - plist[idx].arrival;
+            time += plist[idx].burst;
+            plist[idx].completion = time;
+            plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
+            plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
+            done[idx] = true;
+            completed++;
+            gantt.push_back({plist[idx].pid, plist[idx].start_time, plist[idx].completion, prev_pid != -1 && prev_pid != plist[idx].pid});
+            prev_pid = plist[idx].pid;
         }
-        if (!pq.empty()) {
-            int procIdx = pq.top().second;
-            int remaining = pq.top().first;
-            pq.pop();
-            int burst = getBurst(processList[procIdx]);
-            int arrival = getArrival(processList[procIdx]);
-            scheduleTimeline[t][procIdx] = '*';
+        printResults("Priority (NP)", plist);
+    }
 
-            if (remaining == 1) {
-                completionTime[procIdx] = t + 1;
-                turnaroundTime[procIdx] = (completionTime[procIdx] - arrival);
-                normalizedTurnaround[procIdx] = (turnaroundTime[procIdx] * 1.0 / burst);
+    // Priority Preemptive
+    void runPriority_P() {
+        resetProcesses();
+        vector<Process> plist = processes;
+        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
+        vector<bool> done(n, false);
+
+        while (completed < n) {
+            int idx = -1, min_pri = INT_MAX;
+            for (int i = 0; i < n; ++i) {
+                if (!done[i] && plist[i].arrival <= time && plist[i].priority < min_pri && plist[i].burst_remain > 0) {
+                    min_pri = plist[i].priority;
+                    idx = i;
+                }
+            }
+            if (idx == -1) { time++; continue; }
+            if (prev_pid != -1 && prev_pid != plist[idx].pid)
+                time += context_switch_overhead;
+            if (plist[idx].start_time == -1)
+                plist[idx].start_time = time, plist[idx].response = time - plist[idx].arrival;
+            int next_time = time + 1;
+            plist[idx].burst_remain--;
+            if (plist[idx].burst_remain == 0) {
+                plist[idx].completion = next_time;
+                plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
+                plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
+                done[idx] = true;
+                completed++;
+            }
+            gantt.push_back({plist[idx].pid, time, next_time, prev_pid != -1 && prev_pid != plist[idx].pid});
+            prev_pid = plist[idx].pid;
+            time = next_time;
+        }
+        printResults("Priority (P)", plist);
+    }
+
+    // Round Robin
+    void runRR(int quantum) {
+        resetProcesses();
+        vector<Process> plist = processes;
+        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
+        queue<int> ready;
+        vector<bool> in_queue(n, false);
+
+        while (completed < n) {
+            for (int i = 0; i < n; ++i)
+                if (!in_queue[i] && plist[i].arrival <= time && plist[i].burst_remain > 0)
+                    ready.push(i), in_queue[i] = true;
+            if (ready.empty()) { time++; continue; }
+            int idx = ready.front(); ready.pop();
+            if (prev_pid != -1 && prev_pid != plist[idx].pid)
+                time += context_switch_overhead;
+            if (plist[idx].start_time == -1)
+                plist[idx].start_time = time, plist[idx].response = time - plist[idx].arrival;
+            int exec = min(quantum, plist[idx].burst_remain);
+            gantt.push_back({plist[idx].pid, time, time + exec, prev_pid != -1 && prev_pid != plist[idx].pid});
+            time += exec;
+            plist[idx].burst_remain -= exec;
+            for (int i = 0; i < n; ++i)
+                if (!in_queue[i] && plist[i].arrival <= time && plist[i].burst_remain > 0)
+                    ready.push(i), in_queue[i] = true;
+            if (plist[idx].burst_remain == 0) {
+                plist[idx].completion = time;
+                plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
+                plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
+                completed++;
             } else {
-                pq.push({remaining - 1, procIdx});
+                ready.push(idx);
             }
+            prev_pid = plist[idx].pid;
         }
+        printResults("RR", plist);
     }
-    markWaitingPeriods();
-}
 
-// Highest Response Ratio Next
-void runHRRN() {
-    vector<tuple<string, double, int>> readyQueue; // (procID, responseRatio, timeServed)
-    int nextProc = 0;
-    for (int t = 0; t < totalTimeUnits; t++) {
-        while (nextProc < totalProcesses && getArrival(processList[nextProc]) <= t) {
-            readyQueue.push_back({getProcessID(processList[nextProc]), 1.0, 0});
-            nextProc++;
+    // MLQ
+    void runMLQ() {
+        resetProcesses();
+        vector<Process> q1, q2, q3;
+        for (auto p : processes) {
+            if (p.priority >= 7) q1.push_back(p);      // Highest
+            else if (p.priority >= 4) q2.push_back(p); // Medium
+            else q3.push_back(p);                      // Lowest
         }
-        for (auto& proc : readyQueue) {
-            string procID = get<0>(proc);
-            int procIdx = processIDtoIndex[procID];
-            int wait = t - getArrival(processList[procIdx]);
-            int burst = getBurst(processList[procIdx]);
-            get<1>(proc) = computeResponseRatio(wait, burst);
-        }
-        sort(all(readyQueue), sortByResponseRatioDesc);
 
-        if (!readyQueue.empty()) {
-            int procIdx = processIDtoIndex[get<0>(readyQueue[0])];
-            while (t < totalTimeUnits && get<2>(readyQueue[0]) != getBurst(processList[procIdx])) {
-                scheduleTimeline[t][procIdx] = '*';
-                t++;
-                get<2>(readyQueue[0])++;
-            }
-            t--;
-            readyQueue.erase(readyQueue.begin());
-            completionTime[procIdx] = t + 1;
-            turnaroundTime[procIdx] = completionTime[procIdx] - getArrival(processList[procIdx]);
-            normalizedTurnaround[procIdx] = (turnaroundTime[procIdx] * 1.0 / getBurst(processList[procIdx]));
-        }
+        int time = 0, prev_pid = -1;
+        vector<GanttEntry> mlq_gantt;
+        int total = q1.size() + q2.size() + q3.size();
+
+        int completed = runQueueRR(q1, 4, time, prev_pid, mlq_gantt);
+        completed += runQueuePriorityNP(q2, time, prev_pid, mlq_gantt);
+        completed += runQueueFCFS(q3, time, prev_pid, mlq_gantt);
+
+        vector<Process> all;
+        all.insert(all.end(), q1.begin(), q1.end());
+        all.insert(all.end(), q2.begin(), q2.end());
+        all.insert(all.end(), q3.begin(), q3.end());
+
+        gantt = mlq_gantt;
+        printResults("MLQ", all);
     }
-    markWaitingPeriods();
-}
 
-// Feedback Queue FB-1
-void runFB1() {
-    priority_queue<pair<int, int>, vector<pair<int, int>>, greater<pair<int, int>>> pq; // (priority, procIdx)
-    unordered_map<int, int> remainingBurst;
-    int nextProc = 0;
-    if (getArrival(processList[0]) == 0) {
-        pq.push({0, nextProc});
-        remainingBurst[nextProc] = getBurst(processList[nextProc]);
-        nextProc++;
-    }
-    for (int t = 0; t < totalTimeUnits; t++) {
-        if (!pq.empty()) {
-            int priority = pq.top().first;
-            int procIdx = pq.top().second;
-            int arrival = getArrival(processList[procIdx]);
-            int burst = getBurst(processList[procIdx]);
-            pq.pop();
-            while (nextProc < totalProcesses && getArrival(processList[nextProc]) == t + 1) {
-                pq.push({0, nextProc});
-                remainingBurst[nextProc] = getBurst(processList[nextProc]);
-                nextProc++;
-            }
-            remainingBurst[procIdx]--;
-            scheduleTimeline[t][procIdx] = '*';
-            if (remainingBurst[procIdx] == 0) {
-                completionTime[procIdx] = t + 1;
-                turnaroundTime[procIdx] = (completionTime[procIdx] - arrival);
-                normalizedTurnaround[procIdx] = (turnaroundTime[procIdx] * 1.0 / burst);
+    // MLFQ
+    void runMLFQ() {
+        resetProcesses();
+        vector<Process> plist = processes;
+        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
+        queue<int> q1, q2, q3;
+        vector<int> level(n, 0);
+        vector<bool> in_queue(n, false);
+
+        const int q1_quantum = 8, q2_quantum = 16;
+        while (completed < n) {
+            for (int i = 0; i < n; ++i)
+                if (!in_queue[i] && plist[i].arrival <= time && plist[i].burst_remain > 0)
+                    q1.push(i), in_queue[i] = true, level[i] = 0;
+            int idx = -1, exec = 0, queue_used = 0;
+            if (!q1.empty()) { idx = q1.front(); q1.pop(); exec = min(q1_quantum, plist[idx].burst_remain); queue_used = 1; }
+            else if (!q2.empty()) { idx = q2.front(); q2.pop(); exec = min(q2_quantum, plist[idx].burst_remain); queue_used = 2; }
+            else if (!q3.empty()) { idx = q3.front(); q3.pop(); exec = plist[idx].burst_remain; queue_used = 3; }
+            else { time++; continue; }
+            if (prev_pid != -1 && prev_pid != plist[idx].pid)
+                time += context_switch_overhead;
+            if (plist[idx].start_time == -1)
+                plist[idx].start_time = time, plist[idx].response = time - plist[idx].arrival;
+            gantt.push_back({plist[idx].pid, time, time + exec, prev_pid != -1 && prev_pid != plist[idx].pid});
+            time += exec;
+            plist[idx].burst_remain -= exec;
+            for (int i = 0; i < n; ++i)
+                if (!in_queue[i] && plist[i].arrival <= time && plist[i].burst_remain > 0)
+                    q1.push(i), in_queue[i] = true, level[i] = 0;
+            if (plist[idx].burst_remain == 0) {
+                plist[idx].completion = time;
+                plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
+                plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
+                completed++;
             } else {
-                if (pq.size() >= 1)
-                    pq.push({priority + 1, procIdx});
-                else
-                    pq.push({priority, procIdx});
+                if (queue_used == 1) { q2.push(idx); level[idx] = 1; }
+                else if (queue_used == 2) { q3.push(idx); level[idx] = 2; }
+                else { q3.push(idx); }
             }
+            prev_pid = plist[idx].pid;
         }
-        while (nextProc < totalProcesses && getArrival(processList[nextProc]) == t + 1) {
-            pq.push({0, nextProc});
-            remainingBurst[nextProc] = getBurst(processList[nextProc]);
-            nextProc++;
-        }
+        printResults("MLFQ", plist);
     }
-    markWaitingPeriods();
-}
 
-// Feedback Queue FB-2i
-void runFB2i() {
-    priority_queue<pair<int, int>, vector<pair<int, int>>, greater<pair<int, int>>> pq; // (priority, procIdx)
-    unordered_map<int, int> remainingBurst;
-    int nextProc = 0;
-    if (getArrival(processList[0]) == 0) {
-        pq.push({0, nextProc});
-        remainingBurst[nextProc] = getBurst(processList[nextProc]);
-        nextProc++;
-    }
-    for (int t = 0; t < totalTimeUnits; t++) {
-        if (!pq.empty()) {
-            int priority = pq.top().first;
-            int procIdx = pq.top().second;
-            int arrival = getArrival(processList[procIdx]);
-            int burst = getBurst(processList[procIdx]);
-            pq.pop();
-            while (nextProc < totalProcesses && getArrival(processList[nextProc]) <= t + 1) {
-                pq.push({0, nextProc});
-                remainingBurst[nextProc] = getBurst(processList[nextProc]);
-                nextProc++;
-            }
-            int quantum = pow(2, priority);
-            int temp = t;
-            while (quantum && remainingBurst[procIdx]) {
-                quantum--;
-                remainingBurst[procIdx]--;
-                scheduleTimeline[temp++][procIdx] = '*';
-            }
-            if (remainingBurst[procIdx] == 0) {
-                completionTime[procIdx] = temp;
-                turnaroundTime[procIdx] = (completionTime[procIdx] - arrival);
-                normalizedTurnaround[procIdx] = (turnaroundTime[procIdx] * 1.0 / burst);
+    // Helpers for MLQ
+    int runQueueRR(vector<Process>& q, int quantum, int& time, int& prev_pid, vector<GanttEntry>& local_gantt) {
+        int finished = 0, n = q.size();
+        queue<int> ready;
+        vector<bool> in_queue(n, false);
+        while (finished < n) {
+            for (int i = 0; i < n; ++i)
+                if (!in_queue[i] && q[i].arrival <= time && q[i].burst_remain > 0)
+                    ready.push(i), in_queue[i] = true;
+            if (ready.empty()) { time++; continue; }
+            int idx = ready.front(); ready.pop();
+            if (prev_pid != -1 && prev_pid != q[idx].pid)
+                time += context_switch_overhead;
+            if (q[idx].start_time == -1)
+                q[idx].start_time = time, q[idx].response = time - q[idx].arrival;
+            int exec = min(quantum, q[idx].burst_remain);
+            local_gantt.push_back({q[idx].pid, time, time + exec, prev_pid != -1 && prev_pid != q[idx].pid});
+            time += exec;
+            q[idx].burst_remain -= exec;
+            for (int i = 0; i < n; ++i)
+                if (!in_queue[i] && q[i].arrival <= time && q[i].burst_remain > 0)
+                    ready.push(i), in_queue[i] = true;
+            if (q[idx].burst_remain == 0) {
+                q[idx].completion = time;
+                q[idx].turnaround = q[idx].completion - q[idx].arrival;
+                q[idx].waiting = q[idx].turnaround - q[idx].burst;
+                finished++;
             } else {
-                if (pq.size() >= 1)
-                    pq.push({priority + 1, procIdx});
-                else
-                    pq.push({priority, procIdx});
+                ready.push(idx);
             }
-            t = temp - 1;
+            prev_pid = q[idx].pid;
         }
-        while (nextProc < totalProcesses && getArrival(processList[nextProc]) <= t + 1) {
-            pq.push({0, nextProc});
-            remainingBurst[nextProc] = getBurst(processList[nextProc]);
-            nextProc++;
-        }
+        return finished;
     }
-    markWaitingPeriods();
+    int runQueuePriorityNP(vector<Process>& q, int& time, int& prev_pid, vector<GanttEntry>& local_gantt) {
+        int finished = 0, n = q.size();
+        vector<bool> done(n, false);
+        while (finished < n) {
+            int idx = -1, min_pri = INT_MAX;
+            for (int i = 0; i < n; ++i)
+                if (!done[i] && q[i].arrival <= time && q[i].priority < min_pri)
+                    min_pri = q[i].priority, idx = i;
+            if (idx == -1) { time++; continue; }
+            if (prev_pid != -1 && prev_pid != q[idx].pid)
+                time += context_switch_overhead;
+            q[idx].start_time = time;
+            q[idx].response = time - q[idx].arrival;
+            local_gantt.push_back({q[idx].pid, time, time + q[idx].burst, prev_pid != -1 && prev_pid != q[idx].pid});
+            time += q[idx].burst;
+            q[idx].completion = time;
+            q[idx].turnaround = q[idx].completion - q[idx].arrival;
+            q[idx].waiting = q[idx].turnaround - q[idx].burst;
+            done[idx] = true;
+            finished++;
+            prev_pid = q[idx].pid;
+        }
+        return finished;
+    }
+    int runQueueFCFS(vector<Process>& q, int& time, int& prev_pid, vector<GanttEntry>& local_gantt) {
+        int finished = 0;
+        sort(q.begin(), q.end(), [](const Process& a, const Process& b) { return a.arrival < b.arrival; });
+        for (auto& p : q) {
+            if (time < p.arrival) time = p.arrival;
+            if (prev_pid != -1 && prev_pid != p.pid)
+                time += context_switch_overhead;
+            p.start_time = time;
+            p.response = time - p.arrival;
+            local_gantt.push_back({p.pid, time, time + p.burst, prev_pid != -1 && prev_pid != p.pid});
+            time += p.burst;
+            p.completion = time;
+            p.turnaround = p.completion - p.arrival;
+            p.waiting = p.turnaround - p.burst;
+            finished++;
+            prev_pid = p.pid;
+        }
+        return finished;
+    }
+
+    // Print Gantt chart and process table
+    void printResults(const string& algo, const vector<Process>& plist) {
+        cout << "\n===== " << algo << " =====\n";
+        cout << "Gantt Chart:\n|";
+        for (auto& g : gantt)
+            cout << " P" << g.pid << " |";
+        cout << "\n0";
+        for (auto& g : gantt)
+            cout << setw(5) << g.end;
+        cout << "\n";
+        cout << "\nPID\tAT\tBT\tPRI\tCT\tTAT\tWT\tRT\n";
+        double sum_tat = 0, sum_wt = 0, sum_rt = 0;
+        for (const auto& p : plist) {
+            cout << "P" << p.pid << "\t" << p.arrival << "\t" << p.burst << "\t"
+                 << p.priority << "\t" << p.completion << "\t" << p.turnaround << "\t"
+                 << p.waiting << "\t" << p.response << "\n";
+            sum_tat += p.turnaround;
+            sum_wt += p.waiting;
+            sum_rt += p.response;
+        }
+        int n = plist.size();
+        cout << fixed << setprecision(2);
+        cout << "Avg TAT: " << sum_tat / n << ", Avg WT: " << sum_wt / n << ", Avg RT: " << sum_rt / n << "\n";
+        gantt.clear();
+    }
+};
+
+void generateRandomProcesses(vector<Process>& plist, int n, int seed = 42) {
+    mt19937 gen(seed);
+    uniform_int_distribution<> arrival_dist(0, 10), burst_dist(2, 20), pri_dist(1, 9);
+    for (int i = 0; i < n; ++i) {
+        int at = arrival_dist(gen);
+        int bt = burst_dist(gen);
+        int pr = pri_dist(gen);
+        plist.emplace_back(i, at, bt, pr);
+    }
 }
 
-// Aging Scheduler
-void runAging(int quantum) {
-    vector<tuple<int, int, int>> procQueue; // (priority, procIdx, waitingTime)
-    int nextProc = 0, currentProc = -1;
-    for (int t = 0; t < totalTimeUnits; t++) {
-        while (nextProc < totalProcesses && getArrival(processList[nextProc]) <= t) {
-            procQueue.push_back({getPriority(processList[nextProc]), nextProc, 0});
-            nextProc++;
-        }
-        for (int i = 0; i < procQueue.size(); i++) {
-            if (get<1>(procQueue[i]) == currentProc) {
-                get<2>(procQueue[i]) = 0;
-                get<0>(procQueue[i]) = getPriority(processList[currentProc]);
-            } else {
-                get<0>(procQueue[i])++;
-                get<2>(procQueue[i])++;
-            }
-        }
-        sort(procQueue.begin(), procQueue.end(), sortByPriority);
-        currentProc = get<1>(procQueue[0]);
-        int timeSlice = quantum;
-        while (timeSlice-- && t < totalTimeUnits) {
-            scheduleTimeline[t][currentProc] = '*';
-            t++;
-        }
-        t--;
-    }
-    markWaitingPeriods();
-}
-
-// Printing functions
-void printSchedulerName(int schedulerIdx) {
-    int schedulerID = schedulerConfigs[schedulerIdx].first - '0';
-    if (schedulerID == 2)
-        cout << SCHEDULER_NAMES[schedulerID] << schedulerConfigs[schedulerIdx].second << endl;
-    else
-        cout << SCHEDULER_NAMES[schedulerID] << endl;
-}
-void printProcessIDs() {
-    cout << "Process    ";
-    for (int i = 0; i < totalProcesses; i++)
-        cout << "|  " << getProcessID(processList[i]) << "  ";
-    cout << "|\n";
-}
-void printArrivals() {
-    cout << "Arrival    ";
-    for (int i = 0; i < totalProcesses; i++)
-        printf("|%3d  ", getArrival(processList[i]));
-    cout << "|\n";
-}
-void printBursts() {
-    cout << "Burst      |";
-    for (int i = 0; i < totalProcesses; i++)
-        printf("%3d  |", getBurst(processList[i]));
-    cout << " Mean|\n";
-}
-void printCompletions() {
-    cout << "Finish     ";
-    for (int i = 0; i < totalProcesses; i++)
-        printf("|%3d  ", completionTime[i]);
-    cout << "|-----|\n";
-}
-void printTurnarounds() {
-    cout << "Turnaround |";
-    int sum = 0;
-    for (int i = 0; i < totalProcesses; i++) {
-        printf("%3d  |", turnaroundTime[i]);
-        sum += turnaroundTime[i];
-    }
-    if ((1.0 * sum / turnaroundTime.size()) >= 10)
-        printf("%2.2f|\n", (1.0 * sum / turnaroundTime.size()));
-    else
-        printf(" %2.2f|\n", (1.0 * sum / turnaroundTime.size()));
-}
-void printNormalizedTurnarounds() {
-    cout << "NormTurn   |";
-    float sum = 0;
-    for (int i = 0; i < totalProcesses; i++) {
-        if (normalizedTurnaround[i] >= 10)
-            printf("%2.2f|", normalizedTurnaround[i]);
-        else
-            printf(" %2.2f|", normalizedTurnaround[i]);
-        sum += normalizedTurnaround[i];
-    }
-    if ((1.0 * sum / normalizedTurnaround.size()) >= 10)
-        printf("%2.2f|\n", (1.0 * sum / normalizedTurnaround.size()));
-    else
-        printf(" %2.2f|\n", (1.0 * sum / normalizedTurnaround.size()));
-}
-void printStatistics(int schedulerIdx) {
-    printSchedulerName(schedulerIdx);
-    printProcessIDs();
-    printArrivals();
-    printBursts();
-    printCompletions();
-    printTurnarounds();
-    printNormalizedTurnarounds();
-}
-void printScheduleTimeline(int schedulerIdx) {
-    for (int t = 0; t <= totalTimeUnits; t++)
-        cout << t % 10 << " ";
-    cout << "\n";
-    cout << "------------------------------------------------\n";
-    for (int i = 0; i < totalProcesses; i++) {
-        cout << getProcessID(processList[i]) << "     |";
-        for (int t = 0; t < totalTimeUnits; t++) {
-            cout << scheduleTimeline[t][i] << "|";
-        }
-        cout << " \n";
-    }
-    cout << "------------------------------------------------\n";
-}
-
-// Scheduler dispatcher
-void runScheduler(char schedulerID, int quantum, string mode) {
-    switch (schedulerID) {
-        case '1':
-            if (mode == TRACE_MODE) cout << "FCFS  ";
-            runFCFS();
-            break;
-        case '2':
-            if (mode == TRACE_MODE) cout << "RR-" << quantum << "  ";
-            runRoundRobin(quantum);
-            break;
-        case '3':
-            if (mode == TRACE_MODE) cout << "SPN   ";
-            runSPN();
-            break;
-        case '4':
-            if (mode == TRACE_MODE) cout << "SRT   ";
-            runSRT();
-            break;
-        case '5':
-            if (mode == TRACE_MODE) cout << "HRRN  ";
-            runHRRN();
-            break;
-        case '6':
-            if (mode == TRACE_MODE) cout << "FB-1  ";
-            runFB1();
-            break;
-        case '7':
-            if (mode == TRACE_MODE) cout << "FB-2i ";
-            runFB2i();
-            break;
-        case '8':
-            if (mode == TRACE_MODE) cout << "Aging ";
-            runAging(quantum);
-            break;
-        default:
-            break;
+void userInputProcesses(vector<Process>& plist, int n) {
+    for (int i = 0; i < n; ++i) {
+        int at, bt, pr;
+        cout << "Enter arrival, burst, priority for P" << i << ": ";
+        cin >> at >> bt >> pr;
+        plist.emplace_back(i, at, bt, pr);
     }
 }
 
 int main() {
-    parse();
-    for (int idx = 0; idx < (int)schedulerConfigs.size(); idx++) {
-        clearScheduleTimeline();
-        runScheduler(schedulerConfigs[idx].first, schedulerConfigs[idx].second, runMode);
-        if (runMode == TRACE_MODE)
-            printScheduleTimeline(idx);
-        else if (runMode == STATISTICS_MODE)
-            printStatistics(idx);
-        cout << "\n";
-    }
+    int n, cs_overhead = 1, input_mode;
+    cout << "Number of processes: "; cin >> n;
+    cout << "Context switch overhead (default 1): "; cin >> cs_overhead;
+    cout << "Enter 1 for random input, 2 for manual: "; cin >> input_mode;
+    vector<Process> plist;
+    if (input_mode == 1) generateRandomProcesses(plist, n);
+    else userInputProcesses(plist, n);
+
+    cout << "\nProcess List:\nPID\tAT\tBT\tPRI\n";
+    for (const auto& p : plist)
+        cout << "P" << p.pid << "\t" << p.arrival << "\t" << p.burst << "\t" << p.priority << "\n";
+
+    Scheduler sched(plist, cs_overhead);
+    sched.runFCFS();
+    sched.runSJF_NP();
+    sched.runSJF_P();
+    sched.runPriority_NP();
+    sched.runPriority_P();
+    sched.runRR(4); // Example quantum
+    sched.runMLQ();
+    sched.runMLFQ();
+
     return 0;
 }
