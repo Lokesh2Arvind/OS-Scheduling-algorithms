@@ -91,10 +91,13 @@ public:
 
         while (completed < n) {
             int idx = -1, min_burst = INT_MAX;
+            int min_time=0;
             for (int i = 0; i < n; ++i) {
                 if (!done[i] && plist[i].arrival <= time && plist[i].burst < min_burst) {
                     min_burst = plist[i].burst;
                     idx = i;
+                }else if(!done[i] ){
+                    min_time=min(min_time,plist[i].arrival);
                 }
             }
             if (idx == -1) {
@@ -152,73 +155,7 @@ public:
         printResults("SJF (P)", plist);
     }
 
-    // Priority Non-Preemptive
-    void runPriority_NP() {
-        resetProcesses();
-        vector<Process> plist = processes;
-        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
-        vector<bool> done(n, false);
-
-        while (completed < n) {
-            int idx = -1, min_pri = INT_MAX;
-            for (int i = 0; i < n; ++i) {
-                if (!done[i] && plist[i].arrival <= time && plist[i].priority < min_pri) {
-                    min_pri = plist[i].priority;
-                    idx = i;
-                }
-            }
-            if (idx == -1) { time++; continue; }
-            if (prev_pid != -1 && prev_pid != plist[idx].pid)
-                time += context_switch_overhead;
-            plist[idx].start_time = time;
-            plist[idx].response = time - plist[idx].arrival;
-            time += plist[idx].burst;
-            plist[idx].completion = time;
-            plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
-            plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
-            done[idx] = true;
-            completed++;
-            gantt.push_back({plist[idx].pid, plist[idx].start_time, plist[idx].completion, prev_pid != -1 && prev_pid != plist[idx].pid});
-            prev_pid = plist[idx].pid;
-        }
-        printResults("Priority (NP)", plist);
-    }
-
-    // Priority Preemptive
-    void runPriority_P() {
-        resetProcesses();
-        vector<Process> plist = processes;
-        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
-        vector<bool> done(n, false);
-
-        while (completed < n) {
-            int idx = -1, min_pri = INT_MAX;
-            for (int i = 0; i < n; ++i) {
-                if (!done[i] && plist[i].arrival <= time && plist[i].priority < min_pri && plist[i].burst_remain > 0) {
-                    min_pri = plist[i].priority;
-                    idx = i;
-                }
-            }
-            if (idx == -1) { time++; continue; }
-            if (prev_pid != -1 && prev_pid != plist[idx].pid)
-                time += context_switch_overhead;
-            if (plist[idx].start_time == -1)
-                plist[idx].start_time = time, plist[idx].response = time - plist[idx].arrival;
-            int next_time = time + 1;
-            plist[idx].burst_remain--;
-            if (plist[idx].burst_remain == 0) {
-                plist[idx].completion = next_time;
-                plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
-                plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
-                done[idx] = true;
-                completed++;
-            }
-            gantt.push_back({plist[idx].pid, time, next_time, prev_pid != -1 && prev_pid != plist[idx].pid});
-            prev_pid = plist[idx].pid;
-            time = next_time;
-        }
-        printResults("Priority (P)", plist);
-    }
+   
 
     // Round Robin
     void runRR(int quantum) {
@@ -242,9 +179,7 @@ public:
             gantt.push_back({plist[idx].pid, time, time + exec, prev_pid != -1 && prev_pid != plist[idx].pid});
             time += exec;
             plist[idx].burst_remain -= exec;
-            for (int i = 0; i < n; ++i)
-                if (!in_queue[i] && plist[i].arrival <= time && plist[i].burst_remain > 0)
-                    ready.push(i), in_queue[i] = true;
+            
             if (plist[idx].burst_remain == 0) {
                 plist[idx].completion = time;
                 plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
@@ -258,153 +193,105 @@ public:
         printResults("RR", plist);
     }
 
-    // MLQ
-    void runMLQ() {
-        resetProcesses();
-        vector<Process> q1, q2, q3;
-        for (auto p : processes) {
-            if (p.priority >= 7) q1.push_back(p);      // Highest
-            else if (p.priority >= 4) q2.push_back(p); // Medium
-            else q3.push_back(p);                      // Lowest
-        }
-
-        int time = 0, prev_pid = -1;
-        vector<GanttEntry> mlq_gantt;
-        int total = q1.size() + q2.size() + q3.size();
-
-        int completed = runQueueRR(q1, 4, time, prev_pid, mlq_gantt);
-        completed += runQueuePriorityNP(q2, time, prev_pid, mlq_gantt);
-        completed += runQueueFCFS(q3, time, prev_pid, mlq_gantt);
-
-        vector<Process> all;
-        all.insert(all.end(), q1.begin(), q1.end());
-        all.insert(all.end(), q2.begin(), q2.end());
-        all.insert(all.end(), q3.begin(), q3.end());
-
-        gantt = mlq_gantt;
-        printResults("MLQ", all);
-    }
-
-    // MLFQ
-    void runMLFQ() {
+    
+    // Highest Response Ratio Next (Non-preemptive)
+    void runHRRN() {
         resetProcesses();
         vector<Process> plist = processes;
         int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
-        queue<int> q1, q2, q3;
-        vector<int> level(n, 0);
-        vector<bool> in_queue(n, false);
+        vector<bool> done(n, false);
 
-        const int q1_quantum = 8, q2_quantum = 16;
         while (completed < n) {
-            for (int i = 0; i < n; ++i)
-                if (!in_queue[i] && plist[i].arrival <= time && plist[i].burst_remain > 0)
-                    q1.push(i), in_queue[i] = true, level[i] = 0;
-            int idx = -1, exec = 0, queue_used = 0;
-            if (!q1.empty()) { idx = q1.front(); q1.pop(); exec = min(q1_quantum, plist[idx].burst_remain); queue_used = 1; }
-            else if (!q2.empty()) { idx = q2.front(); q2.pop(); exec = min(q2_quantum, plist[idx].burst_remain); queue_used = 2; }
-            else if (!q3.empty()) { idx = q3.front(); q3.pop(); exec = plist[idx].burst_remain; queue_used = 3; }
-            else { time++; continue; }
+            int idx = -1;
+            double best_ratio = -1.0;
+
+            // Find the process with the highest response ratio
+            for (int i = 0; i < n; i++) {
+                if (!done[i] && plist[i].arrival <= time) {
+                    int waiting = time - plist[i].arrival;
+                    double ratio = (double)(waiting + plist[i].burst) / plist[i].burst;
+                    if (ratio > best_ratio) {
+                        best_ratio = ratio;
+                        idx = i;
+                    }
+                }
+            }
+
+            if (idx == -1) { 
+                time++; 
+                continue; 
+            }
+
             if (prev_pid != -1 && prev_pid != plist[idx].pid)
                 time += context_switch_overhead;
-            if (plist[idx].start_time == -1)
-                plist[idx].start_time = time, plist[idx].response = time - plist[idx].arrival;
-            gantt.push_back({plist[idx].pid, time, time + exec, prev_pid != -1 && prev_pid != plist[idx].pid});
-            time += exec;
-            plist[idx].burst_remain -= exec;
-            for (int i = 0; i < n; ++i)
-                if (!in_queue[i] && plist[i].arrival <= time && plist[i].burst_remain > 0)
-                    q1.push(i), in_queue[i] = true, level[i] = 0;
-            if (plist[idx].burst_remain == 0) {
-                plist[idx].completion = time;
-                plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
-                plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
-                completed++;
-            } else {
-                if (queue_used == 1) { q2.push(idx); level[idx] = 1; }
-                else if (queue_used == 2) { q3.push(idx); level[idx] = 2; }
-                else { q3.push(idx); }
-            }
+
+            plist[idx].start_time = time;
+            plist[idx].response = time - plist[idx].arrival;
+            time += plist[idx].burst;
+            plist[idx].completion = time;
+            plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
+            plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
+
+            done[idx] = true;
+            completed++;
+
+            gantt.push_back({plist[idx].pid, plist[idx].start_time, plist[idx].completion, prev_pid != -1 && prev_pid != plist[idx].pid});
             prev_pid = plist[idx].pid;
         }
-        printResults("MLFQ", plist);
+
+        printResults("HRRN", plist);
     }
 
-    // Helpers for MLQ
-    int runQueueRR(vector<Process>& q, int quantum, int& time, int& prev_pid, vector<GanttEntry>& local_gantt) {
-        int finished = 0, n = q.size();
-        queue<int> ready;
-        vector<bool> in_queue(n, false);
-        while (finished < n) {
-            for (int i = 0; i < n; ++i)
-                if (!in_queue[i] && q[i].arrival <= time && q[i].burst_remain > 0)
-                    ready.push(i), in_queue[i] = true;
-            if (ready.empty()) { time++; continue; }
-            int idx = ready.front(); ready.pop();
-            if (prev_pid != -1 && prev_pid != q[idx].pid)
-                time += context_switch_overhead;
-            if (q[idx].start_time == -1)
-                q[idx].start_time = time, q[idx].response = time - q[idx].arrival;
-            int exec = min(quantum, q[idx].burst_remain);
-            local_gantt.push_back({q[idx].pid, time, time + exec, prev_pid != -1 && prev_pid != q[idx].pid});
-            time += exec;
-            q[idx].burst_remain -= exec;
-            for (int i = 0; i < n; ++i)
-                if (!in_queue[i] && q[i].arrival <= time && q[i].burst_remain > 0)
-                    ready.push(i), in_queue[i] = true;
-            if (q[idx].burst_remain == 0) {
-                q[idx].completion = time;
-                q[idx].turnaround = q[idx].completion - q[idx].arrival;
-                q[idx].waiting = q[idx].turnaround - q[idx].burst;
-                finished++;
-            } else {
-                ready.push(idx);
-            }
-            prev_pid = q[idx].pid;
-        }
-        return finished;
-    }
-    int runQueuePriorityNP(vector<Process>& q, int& time, int& prev_pid, vector<GanttEntry>& local_gantt) {
-        int finished = 0, n = q.size();
+    // Priority Scheduling with Aging (Prevents starvation)
+    void runPriorityAging(int aging_rate = 1) {
+        resetProcesses();
+        vector<Process> plist = processes;
+        int n = plist.size(), completed = 0, time = 0, prev_pid = -1;
         vector<bool> done(n, false);
-        while (finished < n) {
-            int idx = -1, min_pri = INT_MAX;
-            for (int i = 0; i < n; ++i)
-                if (!done[i] && q[i].arrival <= time && q[i].priority < min_pri)
-                    min_pri = q[i].priority, idx = i;
-            if (idx == -1) { time++; continue; }
-            if (prev_pid != -1 && prev_pid != q[idx].pid)
+
+        while (completed < n) {
+            int idx = -1, best_priority = INT_MAX;
+
+            // Find the process with best (lowest) priority
+            for (int i = 0; i < n; i++) {
+                if (!done[i] && plist[i].arrival <= time) {
+                    if (plist[i].priority < best_priority) {
+                        best_priority = plist[i].priority;
+                        idx = i;
+                    }
+                }
+            }
+
+            if (idx == -1) { 
+                time++; 
+                continue; 
+            }
+
+            // Aging: all waiting processes improve priority
+            for (int i = 0; i < n; i++) {
+                if (!done[i] && plist[i].arrival <= time && i != idx) {
+                    plist[i].priority = max(1, plist[i].priority - aging_rate);
+                }
+            }
+
+            if (prev_pid != -1 && prev_pid != plist[idx].pid)
                 time += context_switch_overhead;
-            q[idx].start_time = time;
-            q[idx].response = time - q[idx].arrival;
-            local_gantt.push_back({q[idx].pid, time, time + q[idx].burst, prev_pid != -1 && prev_pid != q[idx].pid});
-            time += q[idx].burst;
-            q[idx].completion = time;
-            q[idx].turnaround = q[idx].completion - q[idx].arrival;
-            q[idx].waiting = q[idx].turnaround - q[idx].burst;
+
+            plist[idx].start_time = time;
+            plist[idx].response = time - plist[idx].arrival;
+            time += plist[idx].burst;
+            plist[idx].completion = time;
+            plist[idx].turnaround = plist[idx].completion - plist[idx].arrival;
+            plist[idx].waiting = plist[idx].turnaround - plist[idx].burst;
+
             done[idx] = true;
-            finished++;
-            prev_pid = q[idx].pid;
+            completed++;
+
+            gantt.push_back({plist[idx].pid, plist[idx].start_time, plist[idx].completion, prev_pid != -1 && prev_pid != plist[idx].pid});
+            prev_pid = plist[idx].pid;
         }
-        return finished;
-    }
-    int runQueueFCFS(vector<Process>& q, int& time, int& prev_pid, vector<GanttEntry>& local_gantt) {
-        int finished = 0;
-        sort(q.begin(), q.end(), [](const Process& a, const Process& b) { return a.arrival < b.arrival; });
-        for (auto& p : q) {
-            if (time < p.arrival) time = p.arrival;
-            if (prev_pid != -1 && prev_pid != p.pid)
-                time += context_switch_overhead;
-            p.start_time = time;
-            p.response = time - p.arrival;
-            local_gantt.push_back({p.pid, time, time + p.burst, prev_pid != -1 && prev_pid != p.pid});
-            time += p.burst;
-            p.completion = time;
-            p.turnaround = p.completion - p.arrival;
-            p.waiting = p.turnaround - p.burst;
-            finished++;
-            prev_pid = p.pid;
-        }
-        return finished;
+
+        printResults("Priority + Aging", plist);
     }
 
     // Print Gantt chart and process table
@@ -471,11 +358,9 @@ int main() {
     sched.runFCFS();
     sched.runSJF_NP();
     sched.runSJF_P();
-    sched.runPriority_NP();
-    sched.runPriority_P();
-    sched.runRR(4); // Example quantum
-    sched.runMLQ();
-    sched.runMLFQ();
+    sched.runRR(4);
+    sched.runHRRN();
+    sched.runPriorityAging();
     // end of the program
     return 0;
 }
